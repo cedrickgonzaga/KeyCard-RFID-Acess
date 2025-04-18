@@ -7,9 +7,9 @@
 // Define Pins - Updated to match wiring
 #define SS_PIN 10      // RFID SDA
 #define RST_PIN 3      // RFID RST updated from 9 to match wiring
-#define LOCK_PIN 4     // Relay control updated from 6 to 4
-#define RED_LED 6      // Red LED updated from 4 to 6
-#define GREEN_LED 5    // Green LED stays on pin 5
+#define LOCK_PIN 4     // Relay control to 4
+#define RED_LED 6      // Red LED to 6
+#define GREEN_LED 5    // Green LED on pin 5
 #define MOSFET_PIN 2   // Added for MOSFET control
 
 // RFID Module Setup
@@ -55,9 +55,6 @@ void setup() {
     lcd.print("RTC Error!");
     while (1);
   }
-  
-  // Uncomment the line below to set the RTC to the date & time this sketch was compiled
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   
   rfid.init();
   lcd.init();
