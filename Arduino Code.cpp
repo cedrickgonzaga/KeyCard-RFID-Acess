@@ -290,9 +290,11 @@ void extendedAccessGrant(String name) {
   lcd.setCursor(0, 1);
   lcd.print(name);
   
-  digitalWrite(GREEN_LED, HIGH);   // Turn on Green LED
+  digitalWrite(GREEN_LED, HIGH);
   digitalWrite(LOCK_PIN, LOW);     // Activate relay to unlock the solenoid lock
-  digitalWrite(MOSFET_PIN, HIGH);  // Turn on MOSFET to control solenoid
+  digitalWrite(MOSFET_PIN, HIGH);  // Turn on MOSFET to control solenoid   // Turn on Green LED
+  delay(2000);
+  digitalWrite(GREEN_LED, LOW);
   
   delay(2000);
   
