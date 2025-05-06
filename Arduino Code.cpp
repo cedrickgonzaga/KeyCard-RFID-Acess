@@ -204,10 +204,36 @@ void checkAccess(String cardUID) {
   
   // If not found in the list of authorized users
   if (userName == "") {
-    denyAccess(" Invalid card");
+    // Check if room is occupied first
+    if (doorMaintainedOpen && currentOccupant != "") {
+      // Modified to display the specific occupancy message
+      reason = "Room occupied by " + currentOccupant;
+      lcd.clear();
+      lcd.print("Room is Occupied");
+      lcd.setCursor(0, 1);
+      lcd.print("Access Denied");
+      
+      digitalWrite(RED_LED, HIGH);     // Turn on Red LED
+      digitalWrite(LOCK_PIN, HIGH);    // Ensure door is locked
+      digitalWrite(MOSFET_PIN, LOW);   // Ensure MOSFET is off
+      
+      delay(2000);                     // Show message for 2 seconds
+      digitalWrite(RED_LED, LOW);      // Turn off Red LED
+      
+      lcd.clear();
+      lcd.print("  Door Locked");
+      delay(2000);
+      
+      lcd.clear();
+      lcd.print(" Access Control");
+      lcd.setCursor(0, 1);
+      lcd.print("  System Ready");
+    } else {
+      denyAccess("Room is occupied");
+      reason = "Room is occupied";
+    }
     authorized = false;
     userName = "Unauthorized";
-    reason = "Invalid card";
   }
   
 // Send data to PLX-DAQ with 12-hour time format
@@ -306,11 +332,11 @@ void extendedAccessGrant(String name) {
 
 // Access Denied Function Display with reason (original function kept intact)
 void denyAccess(String reason) {
-  Serial.print("Access Denied: ");
+  Serial.print("Room is occupied: ");
   Serial.println(reason);
   
   lcd.clear();
-  lcd.print(" Access Denied ");
+  lcd.print(" Room is occupied ");
   lcd.setCursor(0, 1);
   lcd.print(reason);  
   
