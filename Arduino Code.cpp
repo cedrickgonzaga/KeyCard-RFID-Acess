@@ -5,12 +5,15 @@
 #include <RTClib.h>    // Add RTC library
 
 // Define Pins - Updated to match wiring
-#define SS_PIN 10      // RFID SDA
-#define RST_PIN 3      // RFID RST updated from 9 to match wiring
-#define LOCK_PIN 4     // Relay control to 4
+#define SS_PIN 7      // RFID SDA
+#define RST_PIN 4      // RFID RST 
+#define LOCK_PIN 8     // Relay 
 #define RED_LED 6      // Red LED to 6
-#define GREEN_LED 5    // Green LED on pin 5
-#define MOSFET_PIN 2   // Added for MOSFET control
+#define GREEN_LED 5    // Green LED 
+#define MOSFET_PIN 2   // MOSFET control
+
+
+
 
 // RFID Module Setup
 RFID rfid(SS_PIN, RST_PIN);
@@ -19,6 +22,9 @@ RTC_DS3231 rtc;       // Create RTC object
 
 // Days of the week array for readability
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
+
+
 
 // Authorized Users Data Structure with time restrictions
 struct AuthorizedUser {
@@ -31,23 +37,26 @@ struct AuthorizedUser {
   bool weekdays[7]; // Access allowed on specific days (Sun=0, Mon=1, ..., Sat=6)
 };
 
-// Added global variables for extended access functionality
 unsigned long doorUnlockedUntil = 0;  // Timestamp when door should be locked again
 String currentOccupant = "";          // Stores the name of the current occupant
 bool doorMaintainedOpen = false;      // Flag to track if door is being held open
 
 const int MAX_USERS = 20;
 AuthorizedUser users[MAX_USERS] = {
-  // Example: Prof. Hans can access from 8:00 to 17:00 on weekdays (Mon-Fri)
-  {"538A1C2F", "Prof. Hans", 22, 45, 22, 50, {true, true, true, true, true, true, true}}
-  // Add more users as needed with their time restrictions
+  // Example: Prof. Hans can access from 8:00 to 17:00 on weekdays (Monday-Friday)
+  {"538A1C2F", "  Mr. Hans", 21, 54, 22, 30, {false, true, true, true, true, true, false}}
+  // You can still add some users here
 };
 
+
+
+// One time setup for all of the modules and setting up the power status of voltage
 void setup() {
   Serial.begin(9600);
   SPI.begin();
-  Wire.begin();      // Initialize I2C communication for RTC
+  Wire.begin(); // Initialize I2C communication for RTC
   
+  //rtc.adjust(DateTime(2025, 5, 7, 0, 5, 0)); | this can be used to adjust the rtc current time just in case it has delays
   // Initialize RTC
   if (!rtc.begin()) {
     Serial.println("Couldn't find RTC");
@@ -55,7 +64,6 @@ void setup() {
     lcd.print("RTC Error!");
     while (1);
   }
-  
   rfid.init();
   lcd.init();
   lcd.backlight();
@@ -63,7 +71,7 @@ void setup() {
   pinMode(LOCK_PIN, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(MOSFET_PIN, OUTPUT);  // Added MOSFET pin
+  pinMode(MOSFET_PIN, OUTPUT);  
   
   digitalWrite(LOCK_PIN, HIGH);    // Relay initially inactive, lock is closed
   digitalWrite(RED_LED, LOW);      // Red LED off
@@ -75,12 +83,14 @@ void setup() {
   lcd.print("  System Ready");
   delay(2000);
   
-  // Setup for Excel logging via PLX-DAQ
+  // Clear the current column in excel and setup the column names from the label part in the second serial.println
   Serial.println("CLEARDATA");
   Serial.println("LABEL, Access, Time, Date, Keycard UID, Name, Reason");
   Serial.println("RESETTIMER");
-  
 }
+
+
+
 
 void loop() {
   if (rfid.isCard()) {
@@ -193,10 +203,17 @@ void checkAccess(String cardUID) {
         userName = users[i].name;
       } else {
         // Valid card but outside allowed hours
-        denyAccess("Outside schedule");
+        if (doorMaintainedOpen) {
+          // Don't override existing occupancy - just deny access
+          showDeniedMessage("Outside schedule");
+          reason = "Outside scheduled hours";
+        } else {
+          // Room is not occupied, so we can show the full denial sequence
+          denyAccess("Outside schedule");
+          reason = "Outside scheduled hours";
+        }
         authorized = false;
         userName = users[i].name;
-        reason = "Outside scheduled hours";
       }
       break;
     }
@@ -206,37 +223,18 @@ void checkAccess(String cardUID) {
   if (userName == "") {
     // Check if room is occupied first
     if (doorMaintainedOpen && currentOccupant != "") {
-      // Modified to display the specific occupancy message
+      // Modified to display the specific occupancy message but not change door state
       reason = "Room occupied by " + currentOccupant;
-      lcd.clear();
-      lcd.print("Room is Occupied");
-      lcd.setCursor(0, 1);
-      lcd.print("Access Denied");
-      
-      digitalWrite(RED_LED, HIGH);     // Turn on Red LED
-      digitalWrite(LOCK_PIN, HIGH);    // Ensure door is locked
-      digitalWrite(MOSFET_PIN, LOW);   // Ensure MOSFET is off
-      
-      delay(2000);                     // Show message for 2 seconds
-      digitalWrite(RED_LED, LOW);      // Turn off Red LED
-      
-      lcd.clear();
-      lcd.print("  Door Locked");
-      delay(2000);
-      
-      lcd.clear();
-      lcd.print(" Access Control");
-      lcd.setCursor(0, 1);
-      lcd.print("  System Ready");
+      showDeniedMessage("Room is occupied");
     } else {
-      denyAccess("Room is occupied");
-      reason = "Room is occupied";
+      denyAccess("  Unauthorized");
+      reason = "Unauthorized card";
     }
     authorized = false;
     userName = "Unauthorized";
   }
   
-// Send data to PLX-DAQ with 12-hour time format
+  // Send data to PLX-DAQ with 12-hour time format
   DateTime now = rtc.now();
   Serial.print("DATA,");
   Serial.print(authorized ? "Granted" : "Denied");
@@ -279,6 +277,34 @@ void checkAccess(String cardUID) {
   Serial.print(userName);
   Serial.print(",");
   Serial.println(reason);
+}
+
+// New function to show denied message but not change door state
+void showDeniedMessage(String reason) {
+  lcd.clear();
+  lcd.print("Access Denied");
+  lcd.setCursor(0, 1);
+  lcd.print(reason);  
+  
+  digitalWrite(RED_LED, HIGH);     // Turn on Red LED
+  
+  // DO NOT change the lock state here - just show the message
+  
+  delay(2000);                    // Display message for 2 seconds
+  digitalWrite(RED_LED, LOW);      // Turn off Red LED
+  
+  // Return to showing the occupied status
+  if (doorMaintainedOpen && currentOccupant != "") {
+    lcd.clear();
+    lcd.print("Room occupied by:");
+    lcd.setCursor(0, 1);
+    lcd.print(currentOccupant);
+  } else {
+    lcd.clear();
+    lcd.print(" Access Control");
+    lcd.setCursor(0, 1);
+    lcd.print("  System Ready");
+  }
 }
 
 // Access Granted Function Display (original function kept intact)
@@ -332,11 +358,8 @@ void extendedAccessGrant(String name) {
 
 // Access Denied Function Display with reason (original function kept intact)
 void denyAccess(String reason) {
-  Serial.print("Room is occupied: ");
-  Serial.println(reason);
-  
   lcd.clear();
-  lcd.print(" Room is occupied ");
+  lcd.print("  Access Denied");
   lcd.setCursor(0, 1);
   lcd.print(reason);  
   
@@ -347,7 +370,7 @@ void denyAccess(String reason) {
   digitalWrite(MOSFET_PIN, LOW);   // Ensure MOSFET is off
   Serial.println("Relay: OFF - Solenoid Lock: LOCKED");
   
-  delay(2000);                    // Display message for 2 seconds
+  delay(4000);                    // Display message for 2 seconds
   digitalWrite(RED_LED, LOW);      // Turn off Red LED
   
   lcd.clear();
