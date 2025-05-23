@@ -2,29 +2,26 @@
 #include <RFID.h>
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
-#include <RTClib.h>    // Add RTC library
-
-// Define Pins - Updated to match wiring
-#define SS_PIN 7      // RFID SDA
-#define RST_PIN 4      // RFID RST 
-#define LOCK_PIN 8     // Relay 
-#define RED_LED 6      // Red LED to 6
-#define GREEN_LED 5    // Green LED 
-#define MOSFET_PIN 2   // MOSFET control
+#include <RTClib.h>    
+#include <Sim800L.h>
 
 
+#define SS_PIN 7       // RFID SDA connected to pin 7
+#define RST_PIN 4      // RFID RST connected to pin 4
+#define LOCK_PIN 8     // Relay control connected to pin 8
+#define RED_LED 6      // Red LED on pin 6
+#define GREEN_LED 5    // Green LED on pin 5
+#define MOSFET_PIN 2   // MOSFET control on pin 2
 
 
 // RFID Module Setup
 RFID rfid(SS_PIN, RST_PIN);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-RTC_DS3231 rtc;       // Create RTC object
+RTC_DS3231 rtc;       
+Sim800L Sim800L(3, 10); // GSM module RX_PIN=3 and TX_PIN=10 
 
 // Days of the week array for readability
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-
-
-
 
 // Authorized Users Data Structure with time restrictions
 struct AuthorizedUser {
@@ -37,26 +34,25 @@ struct AuthorizedUser {
   bool weekdays[7]; // Access allowed on specific days (Sun=0, Mon=1, ..., Sat=6)
 };
 
+// Added global variables for extended access functionality
 unsigned long doorUnlockedUntil = 0;  // Timestamp when door should be locked again
 String currentOccupant = "";          // Stores the name of the current occupant
 bool doorMaintainedOpen = false;      // Flag to track if door is being held open
 
 const int MAX_USERS = 20;
 AuthorizedUser users[MAX_USERS] = {
-  // Example: Prof. Hans can access from 8:00 to 17:00 on weekdays (Monday-Friday)
-  {"538A1C2F", "  Mr. Hans", 21, 54, 22, 30, {false, true, true, true, true, true, false}}
-  // You can still add some users here
+  // Example: Prof. Hans can access from 8:00 to 17:00 on weekdays (Sunday-Saturday)
+  {"538A1C2F", "  Mr. Hans", 12, 0, 24, 0, {false, true, true, true, true, true, false}}
+  // Add more users as needed with their time restrictions
 };
 
-
-
-// One time setup for all of the modules and setting up the power status of voltage
 void setup() {
   Serial.begin(9600);
   SPI.begin();
-  Wire.begin(); // Initialize I2C communication for RTC
+  Wire.begin();      // Initialize I2C communication for RTC
+  Sim800L.begin(4800);  // Setting up GSM module
+  Sim800L.sendSms("+639765480751","HI");
   
-  //rtc.adjust(DateTime(2025, 5, 7, 0, 5, 0)); | this can be used to adjust the rtc current time just in case it has delays
   // Initialize RTC
   if (!rtc.begin()) {
     Serial.println("Couldn't find RTC");
@@ -64,6 +60,8 @@ void setup() {
     lcd.print("RTC Error!");
     while (1);
   }
+  //rtc.adjust(DateTime(2025, 5, 7, 0, 5, 0));
+
   rfid.init();
   lcd.init();
   lcd.backlight();
@@ -71,7 +69,7 @@ void setup() {
   pinMode(LOCK_PIN, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(MOSFET_PIN, OUTPUT);  
+  pinMode(MOSFET_PIN, OUTPUT);  // Added MOSFET pin
   
   digitalWrite(LOCK_PIN, HIGH);    // Relay initially inactive, lock is closed
   digitalWrite(RED_LED, LOW);      // Red LED off
@@ -83,14 +81,12 @@ void setup() {
   lcd.print("  System Ready");
   delay(2000);
   
-  // Clear the current column in excel and setup the column names from the label part in the second serial.println
+  // Setup for Excel logging via PLX-DAQ
   Serial.println("CLEARDATA");
   Serial.println("LABEL, Access, Time, Date, Keycard UID, Name, Reason");
   Serial.println("RESETTIMER");
+  
 }
-
-
-
 
 void loop() {
   if (rfid.isCard()) {
