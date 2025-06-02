@@ -3,8 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
 #include <RTClib.h>    
-#include <Sim800L.h>
-
+#include <SoftwareSerial.h>
 
 #define SS_PIN 7       // RFID SDA connected to pin 7
 #define RST_PIN 4      // RFID RST connected to pin 4
@@ -13,15 +12,25 @@
 #define GREEN_LED 5    // Green LED on pin 5
 #define MOSFET_PIN 2   // MOSFET control on pin 2
 
+// SIM800L Setup
+SoftwareSerial sim800l(3, 10); // RX=3, TX=10
+String adminPhone = "+639208583011"; // Admin phone number
 
 // RFID Module Setup
 RFID rfid(SS_PIN, RST_PIN);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 RTC_DS3231 rtc;       
-Sim800L Sim800L(3, 10); // GSM module RX_PIN=3 and TX_PIN=10 
 
-// Days of the week array for readability
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+// Days of the week array stored in PROGMEM to save RAM
+const char day0[] PROGMEM = "Sunday";
+const char day1[] PROGMEM = "Monday";
+const char day2[] PROGMEM = "Tuesday";
+const char day3[] PROGMEM = "Wednesday";
+const char day4[] PROGMEM = "Thursday";
+const char day5[] PROGMEM = "Friday";
+const char day6[] PROGMEM = "Saturday";
+
+const char* const daysOfTheWeek[] PROGMEM = {day0, day1, day2, day3, day4, day5, day6};
 
 // Authorized Users Data Structure with time restrictions
 struct AuthorizedUser {
@@ -34,33 +43,39 @@ struct AuthorizedUser {
   bool weekdays[7]; // Access allowed on specific days (Sun=0, Mon=1, ..., Sat=6)
 };
 
-// Added global variables for extended access functionality
-unsigned long doorUnlockedUntil = 0;  // Timestamp when door should be locked again
-String currentOccupant = "";          // Stores the name of the current occupant
-bool doorMaintainedOpen = false;      // Flag to track if door is being held open
+// Global variables for extended access functionality
+unsigned long doorUnlockedUntil = 0;  
+String currentOccupant = "";          
+bool doorMaintainedOpen = false;      
+unsigned long lastSMSTime = 0;        // To prevent SMS spam
+const unsigned long SMS_COOLDOWN = 30000; // 30 seconds between SMS
 
-const int MAX_USERS = 20;
+const int MAX_USERS = 5; // Reduced from 20 to save memory
 AuthorizedUser users[MAX_USERS] = {
-  // Example: Prof. Hans can access from 8:00 to 17:00 on weekdays (Sunday-Saturday)
-  {"538A1C2F", "  Mr. Hans", 12, 0, 24, 0, {false, true, true, true, true, true, false}}
-  // Add more users as needed with their time restrictions
+  // Mr. Hans can access 24/7 (all days, all hours)
+  {"538A1C2F", "  Mr. Hans", 0, 0, 23, 59, {true, true, true, true, true, true, true}}
+  // Add more users as needed (max 4 more due to memory constraints)
 };
 
 void setup() {
   Serial.begin(9600);
+  sim800l.begin(9600);
   SPI.begin();
-  Wire.begin();      // Initialize I2C communication for RTC
-  Sim800L.begin(4800);  // Setting up GSM module
-  Sim800L.sendSms("+639765480751","HI");
+  Wire.begin();      
+  
+  // Initialize SIM800L
+  initializeSIM800L();
   
   // Initialize RTC
   if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
+    Serial.println(F("RTC Error!"));
     lcd.clear();
-    lcd.print("RTC Error!");
+    lcd.print(F("RTC Error!"));
     while (1);
   }
-  //rtc.adjust(DateTime(2025, 5, 7, 0, 5, 0));
+  
+  // Uncomment and set current time if needed
+  // rtc.adjust(DateTime(2025, 5, 23, 14, 30, 0));
 
   rfid.init();
   lcd.init();
@@ -69,44 +84,142 @@ void setup() {
   pinMode(LOCK_PIN, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(MOSFET_PIN, OUTPUT);  // Added MOSFET pin
+  pinMode(MOSFET_PIN, OUTPUT);
   
-  digitalWrite(LOCK_PIN, HIGH);    // Relay initially inactive, lock is closed
-  digitalWrite(RED_LED, LOW);      // Red LED off
-  digitalWrite(GREEN_LED, LOW);    // Green LED off
-  digitalWrite(MOSFET_PIN, LOW);   // MOSFET initially off
+  digitalWrite(LOCK_PIN, HIGH);    
+  digitalWrite(RED_LED, LOW);      
+  digitalWrite(GREEN_LED, LOW);    
+  digitalWrite(MOSFET_PIN, LOW);   
   
-  lcd.print(" Access Control");
+  lcd.print(F(" Access Control"));
   lcd.setCursor(0, 1);
-  lcd.print("  System Ready");
+  lcd.print(F("  System Ready"));
   delay(2000);
   
   // Setup for Excel logging via PLX-DAQ
-  Serial.println("CLEARDATA");
-  Serial.println("LABEL, Access, Time, Date, Keycard UID, Name, Reason");
-  Serial.println("RESETTIMER");
+  Serial.println(F("CLEARDATA"));
+  Serial.println(F("LABEL, Access, Time, Date, Keycard UID, Name, Reason"));
+  Serial.println(F("RESETTIMER"));
   
+  // Simple debug info
+  Serial.println(F("System Ready - 24/7 Access Enabled"));
+  
+  // Send startup notification
+  sendSMS("Access Control System Started Successfully");
 }
 
 void loop() {
   if (rfid.isCard()) {
     rfid.readCardSerial();
     String cardUID = getCardUID();
+    
+    // Optional: Print scanned UID for debugging
+    Serial.print(F("Card: "));
+    Serial.println(cardUID);
+    
     checkAccess(cardUID);
     rfid.halt();
   }
   
-  // Continuously check if door state needs to be updated
   maintainDoorState();
 }
 
+// Initialize SIM800L module
+void initializeSIM800L() {
+  Serial.println(F("Initializing SIM800L..."));
+  
+  // Send AT command to check if module is ready
+  sim800l.println("AT");
+  delay(1000);
+  
+  // Set SMS mode to text
+  sim800l.println("AT+CMGF=1");
+  delay(1000);
+  
+  // Enable caller ID
+  sim800l.println("AT+CLIP=1");
+  delay(1000);
+  
+  Serial.println(F("SIM800L Initialized"));
+}
+
+// Function to send SMS
+bool sendSMS(String message) {
+  // Check cooldown to prevent SMS spam
+  if (millis() - lastSMSTime < SMS_COOLDOWN) {
+    return false;
+  }
+  
+  Serial.println(F("Sending SMS..."));
+  
+  // Set SMS recipient
+  sim800l.print("AT+CMGS=\"");
+  sim800l.print(adminPhone);
+  sim800l.println("\"");
+  delay(1000);
+  
+  // Send message content
+  sim800l.print(message);
+  delay(100);
+  
+  // Send Ctrl+Z to finish SMS
+  sim800l.write(26);
+  delay(5000);
+  
+  lastSMSTime = millis();
+  Serial.println(F("SMS Sent"));
+  return true;
+}
+
+// Function to create formatted SMS message with timestamp
+String createSMSMessage(String event, String name, String reason) {
+  DateTime now = rtc.now();
+  String message = "ACCESS ALERT\n";
+  message += event + "\n";
+  message += "User: " + name + "\n";
+  message += "Reason: " + reason + "\n";
+  
+  // Format time in 12-hour format
+  int displayHour = now.hour();
+  String ampm = "AM";
+    
+  if (displayHour == 0) {
+    displayHour = 12;
+    ampm = "AM";
+  } else if (displayHour == 12) {
+    ampm = "PM";
+  } else if (displayHour > 12) {
+    displayHour -= 12;
+    ampm = "PM";
+  }
+
+  message += "Time: ";
+  message += String(displayHour);
+  message += ":";
+  if (now.minute() < 10) message += "0";
+  message += String(now.minute());
+  message += " " + ampm + "\n";
+  
+  message += "Date: ";
+  message += String(now.month());
+  message += "/";
+  message += String(now.day());
+  message += "/";
+  message += String(now.year());
+  
+  return message;
+}
 
 // Convert RFID serial number to string
 String getCardUID() {
   String uid = "";
+  uid.reserve(8); // Reserve memory to prevent fragmentation
+  
   for (int i = 0; i < 4; i++) {
-    uid.concat(String(rfid.serNum[i] < 0x10 ? "0" : ""));
-    uid.concat(String(rfid.serNum[i], HEX));
+    if (rfid.serNum[i] < 0x10) {
+      uid += "0";
+    }
+    uid += String(rfid.serNum[i], HEX);
   }
   uid.toUpperCase();
   return uid;
@@ -115,11 +228,11 @@ String getCardUID() {
 // Check if current time is within allowed access hours for a user
 bool isWithinAllowedTime(AuthorizedUser user) {
   DateTime now = rtc.now();
-  int currentDay = now.dayOfTheWeek(); // 0 = Sunday, 1 = Monday, etc.
+  int currentDay = now.dayOfTheWeek();
   int currentHour = now.hour();
   int currentMinute = now.minute();
   
-  // First check if today is an allowed day
+  // Check if today is an allowed day
   if (!user.weekdays[currentDay]) {
     return false;
   }
@@ -133,63 +246,85 @@ bool isWithinAllowedTime(AuthorizedUser user) {
   return (currentTimeInMinutes >= startTimeInMinutes && currentTimeInMinutes <= endTimeInMinutes);
 }
 
-// Add function to check if door should remain open based on schedule
+// Check if door should remain open based on schedule
 void maintainDoorState() {
-  // If door isn't currently being maintained open, no need to check
   if (!doorMaintainedOpen) {
     return;
   }
   
-  // Check if we should lock the door
   if (millis() > doorUnlockedUntil) {
     // Time is up, lock the door
-    digitalWrite(LOCK_PIN, HIGH);    // Deactivate relay to lock the solenoid
-    digitalWrite(MOSFET_PIN, LOW);   // Turn off MOSFET
-    digitalWrite(GREEN_LED, LOW);    // Turn off Green LED
+    digitalWrite(LOCK_PIN, HIGH);    
+    digitalWrite(MOSFET_PIN, LOW);   
+    digitalWrite(GREEN_LED, LOW);    
     
     lcd.clear();
-    lcd.print("  Door Locked");
+    lcd.print(F("  Door Locked"));
     lcd.setCursor(0, 1);
-    lcd.print("Schedule ended");
+    lcd.print(F("Schedule ended"));
+    
+    // Send SMS notification about door locking
+    String smsMessage = "DOOR LOCKED\n";
+    smsMessage += "User: " + currentOccupant + "\n";
+    smsMessage += "Reason: Schedule ended\n";
+    DateTime now = rtc.now();
+    smsMessage += "Time: " + formatTime(now);
+    sendSMS(smsMessage);
     
     doorMaintainedOpen = false;
     currentOccupant = "";
     
     delay(2000);
     lcd.clear();
-    lcd.print(" Access Control");
+    lcd.print(F(" Access Control"));
     lcd.setCursor(0, 1);
-    lcd.print("  System Ready");
+    lcd.print(F("  System Ready"));
   }
 }
 
-// Modified checkAccess function to handle extended access
+// Helper function to format time
+String formatTime(DateTime dt) {
+  int displayHour = dt.hour();
+  String ampm = "AM";
+    
+  if (displayHour == 0) {
+    displayHour = 12;
+    ampm = "AM";
+  } else if (displayHour == 12) {
+    ampm = "PM";
+  } else if (displayHour > 12) {
+    displayHour -= 12;
+    ampm = "PM";
+  }
+
+  String timeStr = String(displayHour) + ":";
+  if (dt.minute() < 10) timeStr += "0";
+  timeStr += String(dt.minute()) + " " + ampm;
+  
+  return timeStr;
+}
+
+// Modified checkAccess function with SMS notifications
 void checkAccess(String cardUID) {
   bool authorized = false;
   String userName = "";
-  String reason = ""; // Reason for denying access
+  String reason = ""; 
   
   for (int i = 0; i < MAX_USERS; i++) {
-    // If we've reached an empty entry, no need to continue
     if (users[i].rfid == "") {
       break;
     }
     
-    // Check if the card matches
     if (users[i].rfid == cardUID) {
-      // Check if user wants to enable extended access
       if (isWithinAllowedTime(users[i])) {
         // Calculate how long to keep the door open
         DateTime now = rtc.now();
-        int currentDay = now.dayOfTheWeek();
         int endTimeInMinutes = users[i].endHour * 60 + users[i].endMinute;
         
-        // Calculate milliseconds until end of allowed time
         unsigned long currentMinuteOfDay = now.hour() * 60 + now.minute();
         unsigned long minutesRemaining = endTimeInMinutes - currentMinuteOfDay;
         unsigned long millisecondsRemaining = minutesRemaining * 60 * 1000;
         
-        // Set the door to remain unlocked until the end of scheduled time
         doorUnlockedUntil = millis() + millisecondsRemaining;
         doorMaintainedOpen = true;
         currentOccupant = users[i].name;
@@ -197,19 +332,26 @@ void checkAccess(String cardUID) {
         extendedAccessGrant(users[i].name);
         authorized = true;
         userName = users[i].name;
+        reason = "Access granted";
+        
+        // Send SMS notification for successful access
+        String smsMessage = createSMSMessage("ACCESS GRANTED", userName, reason);
+        sendSMS(smsMessage);
+        
       } else {
-        // Valid card but outside allowed hours
         if (doorMaintainedOpen) {
-          // Don't override existing occupancy - just deny access
-          showDeniedMessage("Outside schedule");
+          showDeniedMessage(F("Outside schedule"));
           reason = "Outside scheduled hours";
         } else {
-          // Room is not occupied, so we can show the full denial sequence
-          denyAccess("Outside schedule");
+          denyAccess(F("Outside schedule"));
           reason = "Outside scheduled hours";
         }
         authorized = false;
         userName = users[i].name;
+        
+        // Send SMS notification for denied access
+        String smsMessage = createSMSMessage("ACCESS DENIED", userName, reason);
+        sendSMS(smsMessage);
       }
       break;
     }
@@ -217,164 +359,128 @@ void checkAccess(String cardUID) {
   
   // If not found in the list of authorized users
   if (userName == "") {
-    // Check if room is occupied first
     if (doorMaintainedOpen && currentOccupant != "") {
-      // Modified to display the specific occupancy message but not change door state
-      reason = "Room occupied by " + currentOccupant;
-      showDeniedMessage("Room is occupied");
+      reason = "Room occupied";
+      showDeniedMessage(F("Room is occupied"));
     } else {
-      denyAccess("  Unauthorized");
+      denyAccess(F("  Unauthorized"));
       reason = "Unauthorized card";
     }
     authorized = false;
     userName = "Unauthorized";
+    
+    // Send SMS notification for unauthorized access attempt
+    String smsMessage = createSMSMessage("UNAUTHORIZED ACCESS ATTEMPT", "Unknown User", reason);
+    smsMessage += "\nCard UID: " + cardUID;
+    sendSMS(smsMessage);
   }
   
   // Send data to PLX-DAQ with 12-hour time format
   DateTime now = rtc.now();
-  Serial.print("DATA,");
-  Serial.print(authorized ? "Granted" : "Denied");
-  Serial.print(",");
+  Serial.print(F("DATA,"));
+  Serial.print(authorized ? F("Granted") : F("Denied"));
+  Serial.print(F(","));
 
   // Format time in 12-hour format with AM/PM
   int displayHour = now.hour();
-  String ampm = "AM";
+  String ampm = F("AM");
     
   if (displayHour == 0) {
-    displayHour = 12;  // Midnight
-    ampm = "AM";
+    displayHour = 12;
+    ampm = F("AM");
   } else if (displayHour == 12) {
-    ampm = "PM";       // Noon
+    ampm = F("PM");
   } else if (displayHour > 12) {
-    displayHour -= 12; // PM hours
-    ampm = "PM";
+    displayHour -= 12;
+    ampm = F("PM");
   }
 
   Serial.print(displayHour, DEC);
-  Serial.print(":");
-  if (now.minute() < 10) Serial.print('0');
+  Serial.print(F(":"));
+  if (now.minute() < 10) Serial.print(F("0"));
   Serial.print(now.minute(), DEC);
-  Serial.print(":");
-  if (now.second() < 10) Serial.print('0');
+  Serial.print(F(":"));
+  if (now.second() < 10) Serial.print(F("0"));
   Serial.print(now.second(), DEC);
-  Serial.print(" ");
+  Serial.print(F(" "));
   Serial.print(ampm);
-  Serial.print(",");
+  Serial.print(F(","));
 
-  // Continue with date and other fields
   Serial.print(now.year(), DEC);
-  Serial.print("/");
+  Serial.print(F("/"));
   Serial.print(now.month(), DEC);
-  Serial.print("/");
+  Serial.print(F("/"));
   Serial.print(now.day(), DEC);
-  Serial.print(",");
+  Serial.print(F(","));
   Serial.print(cardUID);
-  Serial.print(",");
+  Serial.print(F(","));
   Serial.print(userName);
-  Serial.print(",");
+  Serial.print(F(","));
   Serial.println(reason);
 }
 
-// New function to show denied message but not change door state
-void showDeniedMessage(String reason) {
+void showDeniedMessage(const __FlashStringHelper* reason) {
   lcd.clear();
-  lcd.print("Access Denied");
+  lcd.print(F("Access Denied"));
   lcd.setCursor(0, 1);
   lcd.print(reason);  
   
-  digitalWrite(RED_LED, HIGH);     // Turn on Red LED
+  digitalWrite(RED_LED, HIGH);
+  delay(2000);
+  digitalWrite(RED_LED, LOW);
   
-  // DO NOT change the lock state here - just show the message
-  
-  delay(2000);                    // Display message for 2 seconds
-  digitalWrite(RED_LED, LOW);      // Turn off Red LED
-  
-  // Return to showing the occupied status
   if (doorMaintainedOpen && currentOccupant != "") {
     lcd.clear();
-    lcd.print("Room occupied by:");
+    lcd.print(F("Room occupied by:"));
     lcd.setCursor(0, 1);
     lcd.print(currentOccupant);
   } else {
     lcd.clear();
-    lcd.print(" Access Control");
+    lcd.print(F(" Access Control"));
     lcd.setCursor(0, 1);
-    lcd.print("  System Ready");
+    lcd.print(F("  System Ready"));
   }
 }
 
-// Access Granted Function Display (original function kept intact)
-void grantAccess(String name) {
-  lcd.print("Access Granted!");
-  lcd.setCursor(0, 1);
-  lcd.print(name);
-  
-  digitalWrite(GREEN_LED, HIGH);   // Turn on Green LED
-  digitalWrite(LOCK_PIN, LOW);     // Activate relay to unlock the solenoid lock
-  digitalWrite(MOSFET_PIN, HIGH);  // Turn on MOSFET to control solenoid
-  
-  delay(2000);                    // Keep open for 5 seconds (increased from 2 to 5)
-  
-  digitalWrite(LOCK_PIN, HIGH);    // Deactivate relay to lock the solenoid
-  digitalWrite(MOSFET_PIN, LOW);   // Turn off MOSFET
-  
-  lcd.clear();
-  lcd.print("  Door Opened");
-  delay(2000);
-  
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Room is occupied");
-  lcd.setCursor(0, 1);
-  lcd.print("by ");
-  lcd.print(name);
-  digitalWrite(GREEN_LED, LOW);    // Turn off Green LED
-}
-
-// New function for extended access
 void extendedAccessGrant(String name) {
   lcd.clear();
-  lcd.print("Access Granted!");  // Add this line
+  lcd.print(F("Access Granted!"));
   lcd.setCursor(0, 1);
   lcd.print(name);
   
   digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(LOCK_PIN, LOW);     // Activate relay to unlock the solenoid lock
-  digitalWrite(MOSFET_PIN, HIGH);  // Turn on MOSFET to control solenoid   // Turn on Green LED
+  digitalWrite(LOCK_PIN, LOW);     
+  digitalWrite(MOSFET_PIN, HIGH);  
+  
   delay(2000);
   digitalWrite(GREEN_LED, LOW);
-  
   delay(2000);
   
   lcd.clear();
-  lcd.print("Room occupied by:");
+  lcd.print(F("Room occupied by:"));
   lcd.setCursor(0, 1);
   lcd.print(name);
 }
 
-// Access Denied Function Display with reason (original function kept intact)
-void denyAccess(String reason) {
+void denyAccess(const __FlashStringHelper* reason) {
   lcd.clear();
-  lcd.print("  Access Denied");
+  lcd.print(F("  Access Denied"));
   lcd.setCursor(0, 1);
   lcd.print(reason);  
   
-  digitalWrite(RED_LED, HIGH);     // Turn on Red LED
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(LOCK_PIN, HIGH);    
+  digitalWrite(MOSFET_PIN, LOW);   
   
-  // Ensure the lock is closed by setting relay to inactive
-  digitalWrite(LOCK_PIN, HIGH);    // Deactivate relay, keeping solenoid lock engaged
-  digitalWrite(MOSFET_PIN, LOW);   // Ensure MOSFET is off
-  Serial.println("Relay: OFF - Solenoid Lock: LOCKED");
-  
-  delay(4000);                    // Display message for 2 seconds
-  digitalWrite(RED_LED, LOW);      // Turn off Red LED
+  delay(4000);
+  digitalWrite(RED_LED, LOW);
   
   lcd.clear();
-  lcd.print("  Door Locked");
+  lcd.print(F("  Door Locked"));
   delay(2000);
   
   lcd.clear();
-  lcd.print(" Access Control");
+  lcd.print(F(" Access Control"));
   lcd.setCursor(0, 1);
-  lcd.print("  System Ready");
+  lcd.print(F("  System Ready"));
 }
