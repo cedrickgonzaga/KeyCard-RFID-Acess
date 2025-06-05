@@ -14,7 +14,7 @@
 
 // SIM800L Setup
 SoftwareSerial sim800l(3, 10); // RX=3, TX=10
-String adminPhone = "+639208583011"; // Admin phone number
+String adminPhone = "+639765480751"; // Admin phone number
 
 // RFID Module Setup
 RFID rfid(SS_PIN, RST_PIN);
@@ -32,6 +32,11 @@ const char day6[] PROGMEM = "Saturday";
 
 const char* const daysOfTheWeek[] PROGMEM = {day0, day1, day2, day3, day4, day5, day6};
 
+// Master Access Card Configuration
+String masterCardUID = "53622439"; 
+String masterCardName = "Master Key";
+const unsigned long MASTER_ACCESS_DURATION = 600000; // 10 minutes in milliseconds
+
 // Authorized Users Data Structure with time restrictions
 struct AuthorizedUser {
   String rfid;
@@ -47,10 +52,12 @@ struct AuthorizedUser {
 unsigned long doorUnlockedUntil = 0;  
 String currentOccupant = "";          
 bool doorMaintainedOpen = false;      
+bool masterAccessActive = false;      // New: Track if master access is active
+unsigned long masterUnlockUntil = 0;  // New: Track master access timer
 unsigned long lastSMSTime = 0;        // To prevent SMS spam
 const unsigned long SMS_COOLDOWN = 30000; // 30 seconds between SMS
 
-const int MAX_USERS = 5; // Reduced from 20 to save memory
+const int MAX_USERS = 5; 
 AuthorizedUser users[MAX_USERS] = {
   // Mr. Hans can access 24/7 (all days, all hours)
   {"538A1C2F", "  Mr. Hans", 0, 0, 23, 59, {true, true, true, true, true, true, true}}
@@ -101,8 +108,9 @@ void setup() {
   Serial.println(F("LABEL, Access, Time, Date, Keycard UID, Name, Reason"));
   Serial.println(F("RESETTIMER"));
   
-  // Simple debug info
   Serial.println(F("System Ready - 24/7 Access Enabled"));
+  Serial.print(F("Master Card UID: "));
+  Serial.println(masterCardUID);
   
   // Send startup notification
   sendSMS("Access Control System Started Successfully");
@@ -113,7 +121,6 @@ void loop() {
     rfid.readCardSerial();
     String cardUID = getCardUID();
     
-    // Optional: Print scanned UID for debugging
     Serial.print(F("Card: "));
     Serial.println(cardUID);
     
@@ -122,6 +129,7 @@ void loop() {
   }
   
   maintainDoorState();
+  checkMasterAccessTimer(); // Check master access timer
 }
 
 // Initialize SIM800L module
@@ -213,7 +221,7 @@ String createSMSMessage(String event, String name, String reason) {
 // Convert RFID serial number to string
 String getCardUID() {
   String uid = "";
-  uid.reserve(8); // Reserve memory to prevent fragmentation
+  uid.reserve(8); 
   
   for (int i = 0; i < 4; i++) {
     if (rfid.serNum[i] < 0x10) {
@@ -244,6 +252,37 @@ bool isWithinAllowedTime(AuthorizedUser user) {
   
   // Check if current time is within allowed hours
   return (currentTimeInMinutes >= startTimeInMinutes && currentTimeInMinutes <= endTimeInMinutes);
+}
+
+// New: Check master access timer
+void checkMasterAccessTimer() {
+  if (masterAccessActive && millis() > masterUnlockUntil) {
+    // Master access time is up, lock the door
+    digitalWrite(LOCK_PIN, HIGH);    
+    digitalWrite(MOSFET_PIN, LOW);   
+    digitalWrite(GREEN_LED, LOW);    
+    
+    lcd.clear();
+    lcd.print(F("  Door Locked"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Master timer end"));
+    
+    // Send SMS notification about door locking
+    String smsMessage = "DOOR LOCKED\n";
+    smsMessage += "User: " + masterCardName + "\n";
+    smsMessage += "Reason: 10-minute timer expired\n";
+    DateTime now = rtc.now();
+    smsMessage += "Time: " + formatTime(now);
+    sendSMS(smsMessage);
+    
+    masterAccessActive = false;
+    
+    delay(2000);
+    lcd.clear();
+    lcd.print(F(" Access Control"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("  System Ready"));
+  }
 }
 
 // Check if door should remain open based on schedule
@@ -304,12 +343,50 @@ String formatTime(DateTime dt) {
   return timeStr;
 }
 
-// Modified checkAccess function with SMS notifications
+// Handle master card access
+void grantMasterAccess() {
+  lcd.clear();
+  lcd.print(F("Master Access!"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("10 min timer"));
+  
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(LOCK_PIN, LOW);     
+  digitalWrite(MOSFET_PIN, HIGH);  
+  
+  // Set master access timer for 10 minutes
+  masterUnlockUntil = millis() + MASTER_ACCESS_DURATION;
+  masterAccessActive = true;
+  
+  delay(2000);
+  digitalWrite(GREEN_LED, LOW);
+  
+  // Show remaining time countdown
+  lcd.clear();
+  lcd.print(F("Door unlocked"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Master: 10 min"));
+}
+
+// Modified checkAccess function with master card support
 void checkAccess(String cardUID) {
   bool authorized = false;
   String userName = "";
   String reason = ""; 
   
+  // Check if it's the master card
+  if (cardUID == masterCardUID) {
+    grantMasterAccess();
+    authorized = true;
+    userName = masterCardName;
+    reason = "Master access granted (10 min)";
+    
+    // Log to PLX-DAQ
+    logAccessAttempt(authorized, userName, reason, cardUID);
+    return;
+  }
+  
+  // Check regular users
   for (int i = 0; i < MAX_USERS; i++) {
     if (users[i].rfid == "") {
       break;
@@ -339,9 +416,10 @@ void checkAccess(String cardUID) {
         sendSMS(smsMessage);
         
       } else {
-        if (doorMaintainedOpen) {
-          showDeniedMessage(F("Outside schedule"));
-          reason = "Outside scheduled hours";
+        if (doorMaintainedOpen || masterAccessActive) {
+          String occupiedBy = doorMaintainedOpen ? currentOccupant : masterCardName;
+          showDeniedMessage(F("Room occupied"));
+          reason = "Room occupied by " + occupiedBy;
         } else {
           denyAccess(F("Outside schedule"));
           reason = "Outside scheduled hours";
@@ -359,9 +437,10 @@ void checkAccess(String cardUID) {
   
   // If not found in the list of authorized users
   if (userName == "") {
-    if (doorMaintainedOpen && currentOccupant != "") {
-      reason = "Room occupied";
-      showDeniedMessage(F("Room is occupied"));
+    if (doorMaintainedOpen || masterAccessActive) {
+      String occupiedBy = doorMaintainedOpen ? currentOccupant : masterCardName;
+      reason = "Room occupied by " + occupiedBy;
+      showDeniedMessage(F("Room occupied"));
     } else {
       denyAccess(F("  Unauthorized"));
       reason = "Unauthorized card";
@@ -375,7 +454,12 @@ void checkAccess(String cardUID) {
     sendSMS(smsMessage);
   }
   
-  // Send data to PLX-DAQ with 12-hour time format
+  // Log to PLX-DAQ
+  logAccessAttempt(authorized, userName, reason, cardUID);
+}
+
+
+void logAccessAttempt(bool authorized, String userName, String reason, String cardUID) {
   DateTime now = rtc.now();
   Serial.print(F("DATA,"));
   Serial.print(authorized ? F("Granted") : F("Denied"));
@@ -434,6 +518,11 @@ void showDeniedMessage(const __FlashStringHelper* reason) {
     lcd.print(F("Room occupied by:"));
     lcd.setCursor(0, 1);
     lcd.print(currentOccupant);
+  } else if (masterAccessActive) {
+    lcd.clear();
+    lcd.print(F("Room occupied by:"));
+    lcd.setCursor(0, 1);
+    lcd.print(masterCardName);
   } else {
     lcd.clear();
     lcd.print(F(" Access Control"));
